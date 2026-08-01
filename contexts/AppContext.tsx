@@ -1,37 +1,15 @@
-import React, { createContext, useState, useCallback, ReactNode } from 'react';
+import React, { createContext, useState, useCallback, useEffect, ReactNode } from 'react';
 import { getPersonaById } from '@/constants/personas';
 import { getCoachResponse } from '@/services/coachService';
 import { parseIntent } from '@/services/intentParser';
+import { useAuth } from '@/contexts/AuthContext';
+import * as SessionService from '@/services/sessionService';
+import * as GoalService from '@/services/goalService';
+import * as ProfileService from '@/services/profileService';
+import type { Session, Goal, VoiceMessage } from '@/types';
 
-export interface Session {
-  id: string;
-  title: string;
-  scheduledAt: string;
-  category: 'morning' | 'midday' | 'evening';
-  type: 'alarm' | 'event' | 'session';
-  status: 'pending' | 'completed';
-  snoozeCount: number;
-  coachMessage: string;
-  linkedGoalId?: string;
-  durationMinutes?: number;
-}
-
-export interface Goal {
-  id: string;
-  title: string;
-  lifeArea: string;
-  horizon: 'day' | 'week' | 'month';
-  status: 'pending' | 'completed';
-  successMetric?: string;
-  linkedSessionIds: string[];
-}
-
-export interface VoiceMessage {
-  id: string;
-  role: 'user' | 'coach';
-  text: string;
-  timestamp: Date;
-}
+// Re-export types for backward compatibility with existing component imports
+export type { Session, Goal, VoiceMessage };
 
 export interface AppContextType {
   sessions: Session[];
@@ -39,6 +17,7 @@ export interface AppContextType {
   activePersonaId: string;
   intensity: number;
   voiceHistory: VoiceMessage[];
+  dataLoading: boolean;
   setActivePersona: (id: string) => void;
   setIntensity: (level: number) => void;
   addSession: (s: Omit<Session, 'id' | 'snoozeCount' | 'status'>) => void;
@@ -48,134 +27,161 @@ export interface AppContextType {
   sendVoiceCommand: (text: string) => string;
   clearVoiceHistory: () => void;
   getTodaySessions: () => Session[];
-  getTodayStats: () => { total: number; completed: number; pending: number; goalsNeedingTime: number };
+  getTodayStats: () => {
+    total: number;
+    completed: number;
+    pending: number;
+    goalsNeedingTime: number;
+  };
   getGreeting: () => string;
 }
 
 export const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const now = new Date();
-const h = (hour: number) =>
-  new Date(new Date(now).setHours(hour, 0, 0, 0)).toISOString();
-
-const INITIAL_SESSIONS: Session[] = [
-  {
-    id: 's1', title: 'Morning activation', scheduledAt: h(7),
-    category: 'morning', type: 'alarm', status: 'completed',
-    snoozeCount: 0, coachMessage: 'Feet on the floor. Own the first hour.', durationMinutes: 30,
-  },
-  {
-    id: 's2', title: 'Focus block: Ship v1', scheduledAt: h(10),
-    category: 'morning', type: 'session', status: 'pending',
-    snoozeCount: 0,
-    coachMessage: 'This block exists to move the release forward. Land one reviewable change.',
-    linkedGoalId: 'g1', durationMinutes: 90,
-  },
-  {
-    id: 's3', title: 'Team standup', scheduledAt: h(14),
-    category: 'midday', type: 'event', status: 'pending',
-    snoozeCount: 0, coachMessage: 'Say the blocker out loud. Clear it and move.', durationMinutes: 15,
-  },
-  {
-    id: 's4', title: 'Strength session', scheduledAt: h(18),
-    category: 'evening', type: 'session', status: 'pending',
-    snoozeCount: 0,
-    coachMessage: 'Third rep of the week. Show up even if the energy is average.',
-    linkedGoalId: 'g2', durationMinutes: 60,
-  },
-];
-
-const INITIAL_GOALS: Goal[] = [
-  {
-    id: 'g1', title: 'Ship v1 mobile app', lifeArea: 'projects',
-    horizon: 'week', status: 'pending',
-    successMetric: 'App submitted to both stores', linkedSessionIds: ['s2'],
-  },
-  {
-    id: 'g2', title: 'Strength training 3x', lifeArea: 'health',
-    horizon: 'week', status: 'pending',
-    successMetric: 'Three completed sessions logged', linkedSessionIds: ['s4'],
-  },
-  {
-    id: 'g3', title: 'Read systems design daily', lifeArea: 'personal_development',
-    horizon: 'day', status: 'pending',
-    successMetric: 'Chapter notes written', linkedSessionIds: [],
-  },
-  {
-    id: 'g4', title: 'Q3 client roadmap', lifeArea: 'work',
-    horizon: 'month', status: 'pending',
-    successMetric: 'Roadmap reviewed with stakeholders', linkedSessionIds: [],
-  },
-];
-
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [sessions, setSessions] = useState<Session[]>(INITIAL_SESSIONS);
-  const [goals, setGoals] = useState<Goal[]>(INITIAL_GOALS);
+  const { user } = useAuth();
+
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
   const [activePersonaId, setActivePersonaId] = useState('coach_core');
   const [intensity, setIntensityState] = useState(3);
   const [voiceHistory, setVoiceHistory] = useState<VoiceMessage[]>([]);
+  const [dataLoading, setDataLoading] = useState(false);
 
-  const setActivePersona = useCallback((id: string) => {
-    setActivePersonaId(id);
-    const persona = getPersonaById(id);
-    setIntensityState(persona.defaultIntensity);
-  }, []);
+  // Load data whenever the user changes
+  useEffect(() => {
+    if (!user) {
+      setSessions([]);
+      setGoals([]);
+      setVoiceHistory([]);
+      setActivePersonaId('coach_core');
+      setIntensityState(3);
+      return;
+    }
 
-  const setIntensity = useCallback((level: number) => {
-    setIntensityState(Math.max(1, Math.min(5, level)));
-  }, []);
+    const loadData = async () => {
+      setDataLoading(true);
+      try {
+        const profile = await ProfileService.fetchProfile(user.id);
+        if (profile) {
+          setActivePersonaId(profile.activePersonaId);
+          setIntensityState(profile.intensity);
+        }
 
-  const getTodaySessions = useCallback(() => {
-    const todayStr = new Date().toDateString();
-    return sessions
-      .filter(s => new Date(s.scheduledAt).toDateString() === todayStr)
-      .sort(
-        (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
-      );
-  }, [sessions]);
+        const fetchedSessions = await SessionService.fetchSessions(user.id);
+        setSessions(fetchedSessions);
+
+        const fetchedGoals = await GoalService.fetchGoals(user.id, fetchedSessions);
+        setGoals(fetchedGoals);
+      } catch (err) {
+        console.error('[AppContext] Failed to load data:', err);
+      } finally {
+        setDataLoading(false);
+      }
+    };
+
+    loadData();
+  }, [user?.id]);
+
+  // ─── Persona & Intensity ─────────────────────────────────────────────────
+
+  const setActivePersona = useCallback(
+    (id: string) => {
+      const persona = getPersonaById(id);
+      setActivePersonaId(id);
+      setIntensityState(persona.defaultIntensity);
+      if (user) {
+        ProfileService.updateProfile(user.id, {
+          activePersonaId: id,
+          intensity: persona.defaultIntensity,
+        });
+      }
+    },
+    [user]
+  );
+
+  const setIntensity = useCallback(
+    (level: number) => {
+      const clamped = Math.max(1, Math.min(5, level));
+      setIntensityState(clamped);
+      if (user) {
+        ProfileService.updateProfile(user.id, { intensity: clamped });
+      }
+    },
+    [user]
+  );
+
+  // ─── Sessions ────────────────────────────────────────────────────────────
 
   const addSession = useCallback(
-    (session: Omit<Session, 'id' | 'snoozeCount' | 'status'>) => {
-      const newSession: Session = {
-        ...session, id: `s${Date.now()}`, snoozeCount: 0, status: 'pending',
-      };
-      setSessions(prev =>
-        [...prev, newSession].sort(
-          (a, b) => new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
+    async (session: Omit<Session, 'id' | 'snoozeCount' | 'status'>) => {
+      if (!user) return;
+      try {
+        const newSession = await SessionService.createSession(user.id, session);
+        setSessions((prev) =>
+          [...prev, newSession].sort(
+            (a, b) =>
+              new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
+          )
+        );
+      } catch (err) {
+        console.error('[AppContext] Failed to add session:', err);
+      }
+    },
+    [user]
+  );
+
+  const completeSession = useCallback(async (id: string) => {
+    // Optimistic update
+    setSessions((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, status: 'completed' as const } : s))
+    );
+    try {
+      const updated = await SessionService.markSessionComplete(id);
+      setSessions((prev) => prev.map((s) => (s.id === id ? updated : s)));
+    } catch (err) {
+      console.error('[AppContext] Failed to complete session:', err);
+    }
+  }, []);
+
+  const snoozeSession = useCallback(
+    async (id: string) => {
+      const session = sessions.find((s) => s.id === id);
+      if (!session) return;
+      const newCount = session.snoozeCount + 1;
+      const newAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+      // Optimistic update
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === id ? { ...s, snoozeCount: newCount, scheduledAt: newAt } : s
         )
       );
+      try {
+        const updated = await SessionService.snoozeSessionById(id, newCount);
+        setSessions((prev) => prev.map((s) => (s.id === id ? updated : s)));
+      } catch (err) {
+        console.error('[AppContext] Failed to snooze session:', err);
+      }
     },
-    []
+    [sessions]
   );
 
-  const completeSession = useCallback((id: string) => {
-    setSessions(prev =>
-      prev.map(s => (s.id === id ? { ...s, status: 'completed' as const } : s))
-    );
-  }, []);
-
-  const snoozeSession = useCallback((id: string) => {
-    setSessions(prev =>
-      prev.map(s => {
-        if (s.id !== id) return s;
-        return {
-          ...s,
-          snoozeCount: s.snoozeCount + 1,
-          scheduledAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-        };
-      })
-    );
-  }, []);
+  // ─── Goals ───────────────────────────────────────────────────────────────
 
   const addGoal = useCallback(
-    (goal: Omit<Goal, 'id' | 'linkedSessionIds' | 'status'>) => {
-      setGoals(prev => [
-        ...prev,
-        { ...goal, id: `g${Date.now()}`, status: 'pending', linkedSessionIds: [] },
-      ]);
+    async (goal: Omit<Goal, 'id' | 'linkedSessionIds' | 'status'>) => {
+      if (!user) return;
+      try {
+        const newGoal = await GoalService.createGoal(user.id, goal);
+        setGoals((prev) => [...prev, newGoal]);
+      } catch (err) {
+        console.error('[AppContext] Failed to add goal:', err);
+      }
     },
-    []
+    [user]
   );
+
+  // ─── Voice ───────────────────────────────────────────────────────────────
 
   const sendVoiceCommand = useCallback(
     (text: string): string => {
@@ -185,9 +191,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         text,
         timestamp: new Date(),
       };
+
       const intent = parseIntent(text);
       const todaySessions = sessions.filter(
-        s => new Date(s.scheduledAt).toDateString() === new Date().toDateString()
+        (s) => new Date(s.scheduledAt).toDateString() === new Date().toDateString()
       );
       const coachText = getCoachResponse(intent, {
         sessions: todaySessions,
@@ -195,13 +202,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
         personaId: activePersonaId,
         intensity,
       });
+
       const coachMsg: VoiceMessage = {
         id: `vm${Date.now() + 1}`,
         role: 'coach',
         text: coachText,
         timestamp: new Date(),
       };
-      setVoiceHistory(prev => [...prev.slice(-30), userMsg, coachMsg]);
+
+      setVoiceHistory((prev) => [...prev.slice(-30), userMsg, coachMsg]);
       return coachText;
     },
     [sessions, goals, activePersonaId, intensity]
@@ -209,15 +218,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const clearVoiceHistory = useCallback(() => setVoiceHistory([]), []);
 
+  // ─── Derived state ───────────────────────────────────────────────────────
+
+  const getTodaySessions = useCallback((): Session[] => {
+    const todayStr = new Date().toDateString();
+    return sessions
+      .filter((s) => new Date(s.scheduledAt).toDateString() === todayStr)
+      .sort(
+        (a, b) =>
+          new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
+      );
+  }, [sessions]);
+
   const getTodayStats = useCallback(() => {
     const today = getTodaySessions();
     const goalsNeedingTime = goals.filter(
-      g => g.status !== 'completed' && g.linkedSessionIds.length === 0
+      (g) => g.status !== 'completed' && g.linkedSessionIds.length === 0
     ).length;
     return {
       total: today.length,
-      completed: today.filter(s => s.status === 'completed').length,
-      pending: today.filter(s => s.status === 'pending').length,
+      completed: today.filter((s) => s.status === 'completed').length,
+      pending: today.filter((s) => s.status === 'pending').length,
       goalsNeedingTime,
     };
   }, [sessions, goals, getTodaySessions]);
@@ -230,11 +251,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
   return (
     <AppContext.Provider
       value={{
-        sessions, goals, activePersonaId, intensity, voiceHistory,
-        setActivePersona, setIntensity,
-        addSession, completeSession, snoozeSession, addGoal,
-        sendVoiceCommand, clearVoiceHistory,
-        getTodaySessions, getTodayStats, getGreeting,
+        sessions,
+        goals,
+        activePersonaId,
+        intensity,
+        voiceHistory,
+        dataLoading,
+        setActivePersona,
+        setIntensity,
+        addSession,
+        completeSession,
+        snoozeSession,
+        addGoal,
+        sendVoiceCommand,
+        clearVoiceHistory,
+        getTodaySessions,
+        getTodayStats,
+        getGreeting,
       }}
     >
       {children}

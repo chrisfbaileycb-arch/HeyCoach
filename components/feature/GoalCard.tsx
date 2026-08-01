@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Colors, Spacing, Radius, Typography } from '@/constants/theme';
-import { Goal } from '@/contexts/AppContext';
+import type { Goal } from '@/types';
 
 interface GoalCardProps {
   goal: Goal;

@@ -4,6 +4,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Colors, Spacing, Radius, Typography } from '@/constants/theme';
 import { useApp } from '@/hooks/useApp';
+import { useAuth } from '@/contexts/AuthContext';
 import {
   PERSONAS,
   getPersonaById,
@@ -23,6 +24,7 @@ export default function PersonasScreen() {
   const insets = useSafeAreaInsets();
   const { activePersonaId, intensity, setActivePersona, setIntensity } =
     useApp();
+  const { signOut } = useAuth();
   const persona = getPersonaById(activePersonaId);
 
   const sampleMsg = useMemo(
@@ -42,6 +44,18 @@ export default function PersonasScreen() {
       <Text style={styles.pageSub}>
         Choose style and intensity. Every message adapts.
       </Text>
+
+      {/* Sign Out */}
+      <Pressable
+        style={({ pressed }) => [
+          styles.signOutBtn,
+          { opacity: pressed ? 0.7 : 1 },
+        ]}
+        onPress={signOut}
+      >
+        <MaterialIcons name="logout" size={15} color={Colors.textSubtle} />
+        <Text style={styles.signOutTxt}>Sign Out</Text>
+      </Pressable>
 
       {/* Active Persona Summary */}
       <View
@@ -335,4 +349,18 @@ const styles = StyleSheet.create({
   compareInfo: { flex: 1 },
   compareName: { ...Typography.smallBold, marginBottom: 2 },
   compareTone: { ...Typography.micro, color: Colors.textSubtle },
+  signOutBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-end',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.card,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: Spacing.md,
+  },
+  signOutTxt: { ...Typography.micro, color: Colors.textSubtle },
 });
