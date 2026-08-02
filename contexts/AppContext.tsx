@@ -20,6 +20,8 @@ export interface AppContextType {
   voiceHistory: VoiceMessage[];
   dataLoading: boolean;
   generatingMessageIds: string[];
+  briefing: string | null;
+  briefingLoading: boolean;
   setActivePersona: (id: string) => void;
   setIntensity: (level: number) => void;
   addSession: (s: Omit<Session, 'id' | 'snoozeCount' | 'status'>) => void;
@@ -28,6 +30,7 @@ export interface AppContextType {
   addGoal: (g: Omit<Goal, 'id' | 'linkedSessionIds' | 'status'>) => void;
   sendVoiceCommand: (text: string) => string;
   clearVoiceHistory: () => void;
+  refreshBriefing: () => void;
   getTodaySessions: () => Session[];
   getTodayStats: () => {
     total: number;
@@ -50,6 +53,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [voiceHistory, setVoiceHistory] = useState<VoiceMessage[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [generatingMessageIds, setGeneratingMessageIds] = useState<string[]>([]);
+  const [briefing, setBriefing] = useState<string | null>(null);
+  const [briefingLoading, setBriefingLoading] = useState(false);
 
   // Load data whenever the user changes
   useEffect(() => {
@@ -59,27 +64,71 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setVoiceHistory([]);
       setActivePersonaId('coach_core');
       setIntensityState(3);
+      setBriefing(null);
+      setBriefingLoading(false);
       return;
     }
 
     const loadData = async () => {
       setDataLoading(true);
+      setBriefing(null);
+      setBriefingLoading(true);
+
       try {
+        // ── Load profile & preferences ──────────────────────────────
         const profile = await ProfileService.fetchProfile(user.id);
+        const currentPersonaId = profile?.activePersonaId ?? 'coach_core';
+        const currentIntensity = profile?.intensity ?? 3;
+
         if (profile) {
-          setActivePersonaId(profile.activePersonaId);
-          setIntensityState(profile.intensity);
+          setActivePersonaId(currentPersonaId);
+          setIntensityState(currentIntensity);
         }
 
+        // ── Load sessions & goals ────────────────────────────────────
         const fetchedSessions = await SessionService.fetchSessions(user.id);
         setSessions(fetchedSessions);
 
         const fetchedGoals = await GoalService.fetchGoals(user.id, fetchedSessions);
         setGoals(fetchedGoals);
+
+        // Main UI is ready — reveal it while briefing generates
+        setDataLoading(false);
+
+        // ── Generate daily briefing (non-blocking for main UI) ───────
+        const todayStr = new Date().toDateString();
+        const todaySessions = fetchedSessions.filter(
+          (s) => new Date(s.scheduledAt).toDateString() === todayStr
+        );
+        const currentPersona = getPersonaById(currentPersonaId);
+
+        const briefingResult = await AiService.generateDailyBriefing({
+          sessions: todaySessions.map((s) => ({
+            title: s.title,
+            scheduledAt: s.scheduledAt,
+            status: s.status,
+            category: s.category,
+            durationMinutes: s.durationMinutes,
+          })),
+          goals: fetchedGoals.map((g) => ({
+            title: g.title,
+            lifeArea: g.lifeArea,
+            horizon: g.horizon,
+            status: g.status,
+            hasTimeBlock: g.linkedSessionIds.length > 0,
+          })),
+          personaName: currentPersona.name,
+          personaTone: currentPersona.tone,
+          intensity: currentIntensity,
+          intensityLabel: INTENSITY_LABELS[currentIntensity] ?? 'Firm',
+        });
+
+        if (briefingResult) setBriefing(briefingResult);
       } catch (err) {
         console.error('[AppContext] Failed to load data:', err);
-      } finally {
         setDataLoading(false);
+      } finally {
+        setBriefingLoading(false);
       }
     };
 
@@ -218,6 +267,45 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [user]
   );
 
+  // ─── Daily Briefing ──────────────────────────────────────────────────────
+
+  const refreshBriefing = useCallback(async () => {
+    if (!user) return;
+    setBriefingLoading(true);
+    try {
+      const persona = getPersonaById(activePersonaId);
+      const todayStr = new Date().toDateString();
+      const todaySessions = sessions.filter(
+        (s) => new Date(s.scheduledAt).toDateString() === todayStr
+      );
+      const result = await AiService.generateDailyBriefing({
+        sessions: todaySessions.map((s) => ({
+          title: s.title,
+          scheduledAt: s.scheduledAt,
+          status: s.status,
+          category: s.category,
+          durationMinutes: s.durationMinutes,
+        })),
+        goals: goals.map((g) => ({
+          title: g.title,
+          lifeArea: g.lifeArea,
+          horizon: g.horizon,
+          status: g.status,
+          hasTimeBlock: g.linkedSessionIds.length > 0,
+        })),
+        personaName: persona.name,
+        personaTone: persona.tone,
+        intensity,
+        intensityLabel: INTENSITY_LABELS[intensity] ?? 'Firm',
+      });
+      if (result) setBriefing(result);
+    } catch (err) {
+      console.error('[AppContext] refreshBriefing failed:', err);
+    } finally {
+      setBriefingLoading(false);
+    }
+  }, [user, sessions, goals, activePersonaId, intensity]);
+
   // ─── Voice ───────────────────────────────────────────────────────────────
 
   const sendVoiceCommand = useCallback(
@@ -295,6 +383,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         voiceHistory,
         dataLoading,
         generatingMessageIds,
+        briefing,
+        briefingLoading,
         setActivePersona,
         setIntensity,
         addSession,
@@ -303,6 +393,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         addGoal,
         sendVoiceCommand,
         clearVoiceHistory,
+        refreshBriefing,
         getTodaySessions,
         getTodayStats,
         getGreeting,

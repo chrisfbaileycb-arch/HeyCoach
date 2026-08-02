@@ -9,6 +9,7 @@ import {
   TextInput,
   Platform,
   KeyboardAvoidingView,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -35,6 +36,10 @@ export default function TodayScreen() {
     completeSession,
     snoozeSession,
     addSession,
+    briefing,
+    briefingLoading,
+    refreshBriefing,
+    dataLoading,
   } = useApp();
 
   const [modalVisible, setModalVisible] = useState(false);
@@ -70,6 +75,7 @@ export default function TodayScreen() {
   };
 
   const emoji = EMOJI[persona.iconName] || '🏆';
+  const showBriefingCard = !dataLoading && (briefingLoading || !!briefing);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -78,7 +84,7 @@ export default function TodayScreen() {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Header */}
+        {/* ── Header ──────────────────────────────────────────────── */}
         <View style={styles.headerWrap}>
           <View style={styles.headerTop}>
             <View>
@@ -99,35 +105,72 @@ export default function TodayScreen() {
                 size={13}
                 color={persona.color}
               />
-              <Text
-                style={[styles.personaBadgeTxt, { color: persona.color }]}
-              >
+              <Text style={[styles.personaBadgeTxt, { color: persona.color }]}>
                 {persona.name}
               </Text>
             </View>
           </View>
 
-          <View
-            style={[styles.greetCard, { borderLeftColor: persona.color }]}
-          >
+          <View style={[styles.greetCard, { borderLeftColor: persona.color }]}>
             <Text style={styles.greetEmoji}>{emoji}</Text>
             <Text style={styles.greetText}>{getGreeting()}</Text>
           </View>
         </View>
 
-        {/* Progress Card */}
+        {/* ── AI Daily Briefing Card ───────────────────────────────── */}
+        {showBriefingCard && (
+          <View style={[styles.briefingCard, { borderColor: Colors.border }]}>
+            {/* Top color stripe */}
+            <View style={[styles.briefingStripe, { backgroundColor: persona.color }]} />
+
+            <View style={styles.briefingInner}>
+              {/* Header row */}
+              <View style={styles.briefingHeaderRow}>
+                <View style={styles.briefingLabelRow}>
+                  <MaterialIcons name="auto-awesome" size={12} color={persona.color} />
+                  <Text style={[styles.briefingLabel, { color: persona.color }]}>
+                    AI BRIEFING
+                  </Text>
+                </View>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.briefingRefreshBtn,
+                    { opacity: pressed ? 0.5 : briefingLoading ? 0.3 : 1 },
+                  ]}
+                  onPress={refreshBriefing}
+                  disabled={briefingLoading}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <MaterialIcons name="refresh" size={16} color={Colors.textSubtle} />
+                </Pressable>
+              </View>
+
+              {/* Content */}
+              {briefingLoading ? (
+                <View style={styles.briefingLoadingRow}>
+                  <ActivityIndicator size="small" color={persona.color} />
+                  <Text style={styles.briefingLoadingTxt}>
+                    {persona.name} is crafting your briefing…
+                  </Text>
+                </View>
+              ) : briefing ? (
+                <Text style={styles.briefingText}>{briefing}</Text>
+              ) : null}
+            </View>
+          </View>
+        )}
+
+        {/* ── Progress Card ────────────────────────────────────────── */}
         <View style={styles.progressCard}>
           <View style={styles.progressTop}>
             <Text style={styles.progressLabel}>Day Progress</Text>
-            <Text
-              style={[styles.progressFraction, { color: persona.color }]}
-            >
+            <Text style={[styles.progressFraction, { color: persona.color }]}>
               {stats.completed}/{stats.total}
             </Text>
           </View>
           <View
             style={styles.progressTrack}
-            onLayout={e => setTrackWidth(e.nativeEvent.layout.width)}
+            onLayout={(e) => setTrackWidth(e.nativeEvent.layout.width)}
           >
             <View
               style={[
@@ -142,7 +185,11 @@ export default function TodayScreen() {
           <View style={styles.statsRow}>
             {[
               { label: 'Scheduled', value: stats.total, icon: 'calendar-today' },
-              { label: 'Completed', value: stats.completed, icon: 'check-circle-outline' },
+              {
+                label: 'Completed',
+                value: stats.completed,
+                icon: 'check-circle-outline',
+              },
               { label: 'Pending', value: stats.pending, icon: 'pending-actions' },
               {
                 label: 'No Time',
@@ -150,7 +197,7 @@ export default function TodayScreen() {
                 icon: 'warning-amber',
                 alert: stats.goalsNeedingTime > 0,
               },
-            ].map(stat => (
+            ].map((stat) => (
               <View key={stat.label} style={styles.statCell}>
                 <MaterialIcons
                   name={stat.icon as any}
@@ -158,10 +205,7 @@ export default function TodayScreen() {
                   color={stat.alert ? Colors.danger : Colors.textSubtle}
                 />
                 <Text
-                  style={[
-                    styles.statValue,
-                    stat.alert ? { color: Colors.danger } : {},
-                  ]}
+                  style={[styles.statValue, stat.alert ? { color: Colors.danger } : {}]}
                 >
                   {stat.value}
                 </Text>
@@ -171,7 +215,7 @@ export default function TodayScreen() {
           </View>
         </View>
 
-        {/* Agenda */}
+        {/* ── Agenda ──────────────────────────────────────────────── */}
         <View style={styles.sectionRow}>
           <Text style={styles.sectionTitle}>Today's Agenda</Text>
           <Pressable
@@ -182,11 +226,7 @@ export default function TodayScreen() {
             onPress={() => setModalVisible(true)}
           >
             <MaterialIcons name="add" size={15} color={persona.color} />
-            <Text
-              style={[styles.addSessionTxt, { color: persona.color }]}
-            >
-              Add
-            </Text>
+            <Text style={[styles.addSessionTxt, { color: persona.color }]}>Add</Text>
           </Pressable>
         </View>
 
@@ -194,12 +234,10 @@ export default function TodayScreen() {
           <View style={styles.empty}>
             <Text style={styles.emptyEmoji}>📅</Text>
             <Text style={styles.emptyTitle}>No sessions today</Text>
-            <Text style={styles.emptyMsg}>
-              {persona.idleMessage(intensity)}
-            </Text>
+            <Text style={styles.emptyMsg}>{persona.idleMessage(intensity)}</Text>
           </View>
         ) : (
-          todaySessions.map(session => (
+          todaySessions.map((session) => (
             <SessionCard
               key={session.id}
               session={session}
@@ -213,16 +251,14 @@ export default function TodayScreen() {
         <View style={{ height: 32 }} />
       </ScrollView>
 
-      {/* Add Session Modal */}
+      {/* ── Add Session Modal ────────────────────────────────────── */}
       <Modal visible={modalVisible} transparent animationType="slide">
         <View style={styles.overlay}>
           <Pressable
             style={styles.backdrop}
             onPress={() => setModalVisible(false)}
           />
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          >
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
             <View style={styles.sheet}>
               <View style={styles.handle} />
               <Text style={styles.sheetTitle}>Add Session</Text>
@@ -301,6 +337,58 @@ const styles = StyleSheet.create({
     lineHeight: 22,
   },
 
+  // ── Briefing Card ────────────────────────────────────────────────────────
+  briefingCard: {
+    backgroundColor: Colors.card,
+    borderRadius: Radius.xl,
+    marginBottom: Spacing.md,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  briefingStripe: {
+    height: 3,
+    width: '100%',
+  },
+  briefingInner: {
+    padding: Spacing.md,
+  },
+  briefingHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.sm,
+  },
+  briefingLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  briefingLabel: {
+    ...Typography.micro,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    fontWeight: '700',
+  },
+  briefingRefreshBtn: {},
+  briefingLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 4,
+  },
+  briefingLoadingTxt: {
+    ...Typography.small,
+    color: Colors.textSubtle,
+    fontStyle: 'italic',
+    flex: 1,
+  },
+  briefingText: {
+    ...Typography.body,
+    color: Colors.textSecondary,
+    lineHeight: 24,
+  },
+
+  // ── Progress Card ────────────────────────────────────────────────────────
   progressCard: {
     backgroundColor: Colors.card,
     borderRadius: Radius.xl,
@@ -349,7 +437,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.xl,
   },
   emptyEmoji: { fontSize: 40, marginBottom: Spacing.md },
-  emptyTitle: { ...Typography.h3, color: Colors.textSecondary, marginBottom: Spacing.sm },
+  emptyTitle: {
+    ...Typography.h3,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.sm,
+  },
   emptyMsg: {
     ...Typography.small,
     color: Colors.textSubtle,
