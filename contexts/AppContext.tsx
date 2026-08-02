@@ -1,11 +1,12 @@
 import React, { createContext, useState, useCallback, useEffect, ReactNode } from 'react';
-import { getPersonaById } from '@/constants/personas';
+import { getPersonaById, INTENSITY_LABELS } from '@/constants/personas';
 import { getCoachResponse } from '@/services/coachService';
 import { parseIntent } from '@/services/intentParser';
 import { useAuth } from '@/contexts/AuthContext';
 import * as SessionService from '@/services/sessionService';
 import * as GoalService from '@/services/goalService';
 import * as ProfileService from '@/services/profileService';
+import * as AiService from '@/services/aiService';
 import type { Session, Goal, VoiceMessage } from '@/types';
 
 // Re-export types for backward compatibility with existing component imports
@@ -18,6 +19,7 @@ export interface AppContextType {
   intensity: number;
   voiceHistory: VoiceMessage[];
   dataLoading: boolean;
+  generatingMessageIds: string[];
   setActivePersona: (id: string) => void;
   setIntensity: (level: number) => void;
   addSession: (s: Omit<Session, 'id' | 'snoozeCount' | 'status'>) => void;
@@ -47,6 +49,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [intensity, setIntensityState] = useState(3);
   const [voiceHistory, setVoiceHistory] = useState<VoiceMessage[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
+  const [generatingMessageIds, setGeneratingMessageIds] = useState<string[]>([]);
 
   // Load data whenever the user changes
   useEffect(() => {
@@ -124,11 +127,45 @@ export function AppProvider({ children }: { children: ReactNode }) {
               new Date(a.scheduledAt).getTime() - new Date(b.scheduledAt).getTime()
           )
         );
+
+        // Generate coach message in background — don't block the UI
+        const persona = getPersonaById(activePersonaId);
+        const linkedGoal = session.linkedGoalId
+          ? goals.find((g) => g.id === session.linkedGoalId)
+          : undefined;
+
+        setGeneratingMessageIds((prev) => [...prev, newSession.id]);
+
+        AiService.generateSessionCoachMessage({
+          sessionTitle: newSession.title,
+          scheduledAt: newSession.scheduledAt,
+          durationMinutes: newSession.durationMinutes,
+          linkedGoalTitle: linkedGoal?.title,
+          personaName: persona.name,
+          personaTone: persona.tone,
+          intensity,
+          intensityLabel: INTENSITY_LABELS[intensity] ?? 'Firm',
+        })
+          .then(async (message) => {
+            if (!message) return;
+            await SessionService.updateCoachMessage(newSession.id, message);
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === newSession.id ? { ...s, coachMessage: message } : s
+              )
+            );
+          })
+          .catch((err) => {
+            console.error('[AppContext] Failed to generate coach message:', err);
+          })
+          .finally(() => {
+            setGeneratingMessageIds((prev) => prev.filter((id) => id !== newSession.id));
+          });
       } catch (err) {
         console.error('[AppContext] Failed to add session:', err);
       }
     },
-    [user]
+    [user, goals, activePersonaId, intensity]
   );
 
   const completeSession = useCallback(async (id: string) => {
@@ -257,6 +294,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         intensity,
         voiceHistory,
         dataLoading,
+        generatingMessageIds,
         setActivePersona,
         setIntensity,
         addSession,

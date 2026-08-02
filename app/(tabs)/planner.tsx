@@ -9,6 +9,7 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -303,12 +304,13 @@ function AddSessionModal({ visible, date, initialHour, goals, onClose, onAdd }: 
 // ─── Session Detail Sheet ─────────────────────────────────────────────────────
 interface DetailSheetProps {
   session: Session | null;
+  isGenerating?: boolean;
   onClose: () => void;
   onComplete: (id: string) => void;
   onSnooze: (id: string) => void;
 }
 
-function DetailSheet({ session, onClose, onComplete, onSnooze }: DetailSheetProps) {
+function DetailSheet({ session, isGenerating, onClose, onComplete, onSnooze }: DetailSheetProps) {
   if (!session) return null;
   const color = catColor(session.category);
   const done = session.status === 'completed';
@@ -326,6 +328,11 @@ function DetailSheet({ session, onClose, onComplete, onSnooze }: DetailSheetProp
             <Text style={detail.title}>{session.title}</Text>
             {session.coachMessage ? (
               <Text style={detail.msg}>{session.coachMessage}</Text>
+            ) : isGenerating ? (
+              <View style={detail.generatingRow}>
+                <ActivityIndicator size="small" color={color} />
+                <Text style={[detail.generatingTxt, { color }]}>Coach is writing your message...</Text>
+              </View>
             ) : null}
             {!done ? (
               <View style={detail.actions}>
@@ -360,14 +367,20 @@ function DetailSheet({ session, onClose, onComplete, onSnooze }: DetailSheetProp
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function PlannerScreen() {
   const insets = useSafeAreaInsets();
-  const { sessions, goals, completeSession, snoozeSession, addSession } = useApp();
+  const { sessions, goals, completeSession, snoozeSession, addSession, generatingMessageIds } = useApp();
   const scrollRef = useRef<ScrollView>(null);
 
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [now, setNow] = useState(() => new Date());
   const [showAdd, setShowAdd] = useState(false);
   const [tapHour, setTapHour] = useState<number | undefined>();
-  const [detailSession, setDetailSession] = useState<Session | null>(null);
+  const [detailSessionId, setDetailSessionId] = useState<string | null>(null);
+
+  // Derive the detail session live from sessions array so coach message updates auto-reflect
+  const detailSession = useMemo(
+    () => (detailSessionId ? sessions.find((s) => s.id === detailSessionId) ?? null : null),
+    [sessions, detailSessionId]
+  );
 
   // Tick every minute for the now-line
   useEffect(() => {
@@ -518,7 +531,7 @@ export default function PlannerScreen() {
                     opacity: done ? 0.65 : 1,
                   },
                 ]}
-                onPress={() => setDetailSession(s)}
+                onPress={() => setDetailSessionId(s.id)}
               >
                 <Text style={[styles.blockTime, { color: done ? Colors.textSubtle : color }]}>
                   {formatBlockTime(s.scheduledAt)}
@@ -580,7 +593,8 @@ export default function PlannerScreen() {
 
       <DetailSheet
         session={detailSession}
-        onClose={() => setDetailSession(null)}
+        isGenerating={detailSession ? generatingMessageIds.includes(detailSession.id) : false}
+        onClose={() => setDetailSessionId(null)}
         onComplete={completeSession}
         onSnooze={snoozeSession}
       />
@@ -884,4 +898,6 @@ const detail = StyleSheet.create({
   btnTxt: { ...Typography.smallBold },
   doneRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: Spacing.sm },
   doneTxt: { ...Typography.small, color: Colors.success },
+  generatingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: Spacing.sm },
+  generatingTxt: { ...Typography.small, fontStyle: 'italic' },
 });

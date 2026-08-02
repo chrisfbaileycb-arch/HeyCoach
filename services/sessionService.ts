@@ -66,6 +66,18 @@ export async function markSessionComplete(sessionId: string): Promise<Session> {
   return rowToSession(data as Record<string, unknown>);
 }
 
+export async function updateCoachMessage(
+  sessionId: string,
+  message: string
+): Promise<void> {
+  const { error } = await supabase
+    .from('sessions')
+    .update({ coach_message: message, updated_at: new Date().toISOString() })
+    .eq('id', sessionId);
+
+  if (error) throw error;
+}
+
 export async function snoozeSessionById(
   sessionId: string,
   newSnoozeCount: number
