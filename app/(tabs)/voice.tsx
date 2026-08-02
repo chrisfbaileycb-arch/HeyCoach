@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -14,84 +14,219 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Colors, Spacing, Radius, Typography } from '@/constants/theme';
 import { useApp } from '@/hooks/useApp';
-import { getPersonaById } from '@/constants/personas';
+import { getPersonaById, INTENSITY_LABELS } from '@/constants/personas';
 import { VoicePulse } from '@/components';
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface Message {
+  id: string;
+  role: 'user' | 'coach';
+  text: string;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
 const QUICK_CMDS = [
   "What's on my agenda?",
   'Status update',
-  'Snooze',
-  'Mark complete',
   'Goal review',
+  'What should I focus on?',
+  'Snooze next session',
 ];
 
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
+const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '';
+const COACH_CHAT_URL = `${SUPABASE_URL}/functions/v1/coach-chat`;
+
+// ─── Screen ───────────────────────────────────────────────────────────────────
 export default function VoiceScreen() {
   const insets = useSafeAreaInsets();
-  const { voiceHistory, sendVoiceCommand, clearVoiceHistory, activePersonaId } =
-    useApp();
+  const { sessions, goals, activePersonaId, intensity } = useApp();
+  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
+  const [streaming, setStreaming] = useState('');
   const [isThinking, setIsThinking] = useState(false);
-  const [lastResponse, setLastResponse] = useState('');
+  const [ttsReady, setTtsReady] = useState('');
   const scrollRef = useRef<ScrollView>(null);
+  // Keep an api-friendly history for context window
+  const historyRef = useRef<{ role: 'user' | 'assistant'; content: string }[]>([]);
 
   const persona = getPersonaById(activePersonaId);
-  const initial = persona.name.charAt(0);
 
+  // Auto-scroll when messages update
+  useEffect(() => {
+    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+  }, [messages, streaming]);
+
+  // ─── Send message ──────────────────────────────────────────────────────────
   const handleSend = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || isThinking) return;
       setInput('');
+      setStreaming('');
+      setTtsReady('');
+
+      // Add user message
+      const userMsg: Message = { id: `u${Date.now()}`, role: 'user', text: trimmed };
+      setMessages(prev => [...prev, userMsg]);
       setIsThinking(true);
-      await new Promise(r => setTimeout(r, 450));
-      const response = sendVoiceCommand(trimmed);
-      setLastResponse(response);
-      setIsThinking(false);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+
+      // Build context payload
+      const sessionContext = sessions.map(s => ({
+        title: s.title,
+        scheduledAt: s.scheduledAt,
+        status: s.status,
+        category: s.category,
+        durationMinutes: s.durationMinutes,
+      }));
+      const goalContext = goals.map(g => ({
+        title: g.title,
+        lifeArea: g.lifeArea,
+        horizon: g.horizon,
+        status: g.status,
+        hasTimeBlock: g.linkedSessionIds.length > 0,
+      }));
+
+      const payload = {
+        message: trimmed,
+        personaId: activePersonaId,
+        personaName: persona.name,
+        personaTone: persona.tone,
+        intensity,
+        intensityLabel: INTENSITY_LABELS[intensity] ?? 'Firm',
+        sessions: sessionContext,
+        goals: goalContext,
+        history: historyRef.current,
+      };
+
+      let fullText = '';
+
+      try {
+        const response = await fetch(COACH_CHAT_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const reader = response.body?.getReader();
+
+        if (reader) {
+          // ── Streaming path ──────────────────────────────────────────
+          const decoder = new TextDecoder();
+          setIsThinking(false);
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            for (const line of lines) {
+              if (!line.startsWith('data:')) continue;
+              const data = line.slice(5).trim();
+              if (data === '[DONE]') break;
+              try {
+                const parsed = JSON.parse(data);
+                const delta = parsed.choices?.[0]?.delta?.content ?? '';
+                if (delta) {
+                  fullText += delta;
+                  setStreaming(fullText);
+                }
+              } catch {
+                // non-JSON line, skip
+              }
+            }
+          }
+        } else {
+          // ── Full response fallback (mobile) ─────────────────────────
+          const text = await response.text();
+          const lines = text.split('\n');
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (data === '[DONE]') break;
+            try {
+              const parsed = JSON.parse(data);
+              const delta = parsed.choices?.[0]?.delta?.content ?? '';
+              if (delta) fullText += delta;
+            } catch {
+              // skip
+            }
+          }
+          setIsThinking(false);
+          setStreaming(fullText);
+        }
+      } catch (err) {
+        console.error('[VoiceScreen] AI error:', err);
+        fullText = persona.idleMessage(intensity);
+        setIsThinking(false);
+        setStreaming(fullText);
+      }
+
+      // Commit streaming text to message history
+      if (fullText) {
+        const coachMsg: Message = { id: `c${Date.now()}`, role: 'coach', text: fullText };
+        setMessages(prev => [...prev, coachMsg]);
+        setStreaming('');
+        setTtsReady(fullText);
+
+        // Update API history for next turn context
+        historyRef.current = [
+          ...historyRef.current.slice(-14),
+          { role: 'user', content: trimmed },
+          { role: 'assistant', content: fullText },
+        ];
+      } else {
+        setIsThinking(false);
+      }
     },
-    [isThinking, sendVoiceCommand]
+    [isThinking, sessions, goals, activePersonaId, intensity, persona]
   );
 
-  const handleSpeak = useCallback(() => {
-    if (!lastResponse) return;
+  // ─── TTS ───────────────────────────────────────────────────────────────────
+  const handleSpeak = useCallback((text: string) => {
     Speech.stop();
-    Speech.speak(lastResponse, { rate: 0.92, pitch: 0.95 });
-  }, [lastResponse]);
+    Speech.speak(text, { rate: 0.92, pitch: 0.95 });
+  }, []);
 
+  const handleClear = useCallback(() => {
+    setMessages([]);
+    setStreaming('');
+    setTtsReady('');
+    historyRef.current = [];
+    Speech.stop();
+  }, []);
+
+  // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
+
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.title}>Voice Console</Text>
         <View style={styles.headerActions}>
-          {lastResponse ? (
+          {ttsReady ? (
             <Pressable
-              style={({ pressed }) => [
-                styles.iconBtn,
-                pressed && { opacity: 0.65 },
-              ]}
-              onPress={handleSpeak}
+              style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.65 }]}
+              onPress={() => handleSpeak(ttsReady)}
             >
-              <MaterialIcons
-                name="volume-up"
-                size={18}
-                color={persona.color}
-              />
+              <MaterialIcons name="volume-up" size={18} color={persona.color} />
             </Pressable>
           ) : null}
-          {voiceHistory.length > 0 && (
+          {messages.length > 0 && (
             <Pressable
-              style={({ pressed }) => [
-                styles.iconBtn,
-                pressed && { opacity: 0.65 },
-              ]}
-              onPress={clearVoiceHistory}
+              style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.65 }]}
+              onPress={handleClear}
             >
-              <MaterialIcons
-                name="delete-sweep"
-                size={18}
-                color={Colors.textSubtle}
-              />
+              <MaterialIcons name="delete-sweep" size={18} color={Colors.textSubtle} />
             </Pressable>
           )}
         </View>
@@ -101,14 +236,17 @@ export default function VoiceScreen() {
       <View style={styles.avatarWrap}>
         <VoicePulse
           personaColor={persona.color}
-          initial={initial}
-          isActive={isThinking}
+          initial={persona.name.charAt(0)}
+          isActive={isThinking || !!streaming}
           size={68}
         />
-        <Text style={[styles.personaName, { color: persona.color }]}>
-          {persona.name}
-        </Text>
+        <Text style={[styles.personaName, { color: persona.color }]}>{persona.name}</Text>
         <Text style={styles.personaSub}>{persona.subtitle}</Text>
+        <View style={[styles.intensityBadge, { backgroundColor: persona.color + '18', borderColor: persona.color + '35' }]}>
+          <Text style={[styles.intensityTxt, { color: persona.color }]}>
+            {INTENSITY_LABELS[intensity] ?? 'Firm'} · {intensity}/5
+          </Text>
+        </View>
       </View>
 
       {/* Messages */}
@@ -118,50 +256,59 @@ export default function VoiceScreen() {
         contentContainerStyle={styles.messagesContent}
         showsVerticalScrollIndicator={false}
       >
-        {voiceHistory.length === 0 && !isThinking ? (
+        {messages.length === 0 && !isThinking && !streaming ? (
           <View style={styles.emptyWrap}>
+            <MaterialIcons name="chat-bubble-outline" size={32} color={Colors.border} />
+            <Text style={styles.emptyTitle}>Ask your coach anything</Text>
             <Text style={styles.emptyTxt}>
-              Ask your coach anything.{'\n'}Try a quick command below.
+              Your agenda, goals, and intensity are loaded.{'\n'}
+              Tap a quick command or type below.
             </Text>
           </View>
         ) : null}
 
-        {voiceHistory.map(msg => (
+        {messages.map(msg => (
           <View
             key={msg.id}
             style={[
               styles.bubble,
               msg.role === 'user'
                 ? styles.userBubble
-                : [
-                    styles.coachBubble,
-                    { borderLeftColor: persona.color },
-                  ],
+                : [styles.coachBubble, { borderLeftColor: persona.color }],
             ]}
           >
             {msg.role === 'coach' && (
-              <Text style={[styles.bubbleLabel, { color: persona.color }]}>
-                {persona.name}
-              </Text>
+              <View style={styles.bubbleHeader}>
+                <Text style={[styles.bubbleLabel, { color: persona.color }]}>
+                  {persona.name}
+                </Text>
+                <Pressable
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  onPress={() => handleSpeak(msg.text)}
+                >
+                  <MaterialIcons name="volume-up" size={12} color={persona.color + '88'} />
+                </Pressable>
+              </View>
             )}
-            <Text
-              style={[
-                styles.bubbleTxt,
-                msg.role === 'user' && styles.userTxt,
-              ]}
-            >
+            <Text style={[styles.bubbleTxt, msg.role === 'user' && styles.userTxt]}>
               {msg.text}
             </Text>
           </View>
         ))}
 
-        {isThinking ? (
-          <View
-            style={[styles.bubble, styles.coachBubble, { borderLeftColor: persona.color }]}
-          >
-            <Text style={[styles.bubbleLabel, { color: persona.color }]}>
-              {persona.name}
-            </Text>
+        {/* Streaming bubble */}
+        {streaming ? (
+          <View style={[styles.bubble, styles.coachBubble, { borderLeftColor: persona.color }]}>
+            <Text style={[styles.bubbleLabel, { color: persona.color }]}>{persona.name}</Text>
+            <Text style={styles.bubbleTxt}>{streaming}</Text>
+            <View style={styles.streamingDot} />
+          </View>
+        ) : null}
+
+        {/* Thinking indicator */}
+        {isThinking && !streaming ? (
+          <View style={[styles.bubble, styles.coachBubble, { borderLeftColor: persona.color }]}>
+            <Text style={[styles.bubbleLabel, { color: persona.color }]}>{persona.name}</Text>
             <Text style={styles.thinkingDots}>• • •</Text>
           </View>
         ) : null}
@@ -179,12 +326,10 @@ export default function VoiceScreen() {
               key={cmd}
               style={({ pressed }) => [
                 styles.chip,
-                pressed && {
-                  opacity: 0.7,
-                  borderColor: persona.color,
-                },
+                pressed && { opacity: 0.7, borderColor: persona.color },
               ]}
               onPress={() => handleSend(cmd)}
+              disabled={isThinking || !!streaming}
             >
               <Text style={styles.chipTxt}>{cmd}</Text>
             </Pressable>
@@ -193,33 +338,28 @@ export default function VoiceScreen() {
       </View>
 
       {/* Input */}
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
-        <View
-          style={[
-            styles.inputRow,
-            { paddingBottom: insets.bottom + Spacing.sm },
-          ]}
-        >
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <View style={[styles.inputRow, { paddingBottom: insets.bottom + Spacing.sm }]}>
           <TextInput
             style={styles.textInput}
-            placeholder="Type a command..."
+            placeholder={isThinking || streaming ? 'Coach is responding...' : 'Ask your coach...'}
             placeholderTextColor={Colors.textSubtle}
             value={input}
             onChangeText={setInput}
             returnKeyType="send"
             onSubmitEditing={() => handleSend(input)}
+            editable={!isThinking && !streaming}
           />
           <Pressable
             style={({ pressed }) => [
               styles.sendBtn,
               {
                 backgroundColor: persona.color,
-                opacity: pressed ? 0.8 : input.trim() ? 1 : 0.35,
+                opacity: pressed ? 0.8 : input.trim() && !isThinking && !streaming ? 1 : 0.35,
               },
             ]}
             onPress={() => handleSend(input)}
+            disabled={!input.trim() || isThinking || !!streaming}
           >
             <MaterialIcons name="send" size={19} color={Colors.textInverse} />
           </Pressable>
@@ -229,6 +369,7 @@ export default function VoiceScreen() {
   );
 }
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
 
@@ -249,13 +390,17 @@ const styles = StyleSheet.create({
     borderColor: Colors.border,
   },
 
-  avatarWrap: { alignItems: 'center', paddingVertical: Spacing.sm },
+  avatarWrap: { alignItems: 'center', paddingVertical: Spacing.sm, paddingBottom: Spacing.md },
   personaName: { ...Typography.bodyBold, marginTop: Spacing.sm },
-  personaSub: {
-    ...Typography.small,
-    color: Colors.textSubtle,
-    marginTop: 2,
+  personaSub: { ...Typography.small, color: Colors.textSubtle, marginTop: 2 },
+  intensityBadge: {
+    marginTop: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+    borderWidth: 1,
   },
+  intensityTxt: { ...Typography.micro },
 
   messages: { flex: 1 },
   messagesContent: {
@@ -263,7 +408,14 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
     flexGrow: 1,
   },
-  emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: Spacing.xl },
+  emptyWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.xl,
+    gap: Spacing.sm,
+  },
+  emptyTitle: { ...Typography.bodyBold, color: Colors.textSecondary, marginTop: Spacing.sm },
   emptyTxt: {
     ...Typography.small,
     color: Colors.textSubtle,
@@ -289,16 +441,34 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.border,
   },
+  bubbleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
   bubbleLabel: {
     ...Typography.micro,
-    marginBottom: 4,
     textTransform: 'uppercase',
   },
   bubbleTxt: { ...Typography.body, color: Colors.text, lineHeight: 22 },
   userTxt: { color: Colors.textSecondary },
   thinkingDots: { ...Typography.h2, color: Colors.textSubtle, letterSpacing: 6 },
 
-  quickWrap: { maxHeight: 56, borderTopWidth: 1, borderTopColor: Colors.border },
+  streamingDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: Colors.primary,
+    marginTop: 6,
+    alignSelf: 'flex-start',
+  },
+
+  quickWrap: {
+    maxHeight: 56,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+  },
   quickContent: {
     paddingHorizontal: Spacing.md,
     gap: Spacing.sm,
