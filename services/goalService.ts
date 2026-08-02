@@ -33,6 +33,17 @@ export async function fetchGoals(
   });
 }
 
+export async function updateGoalStatus(
+  goalId: string,
+  status: Goal['status']
+): Promise<void> {
+  const { error } = await supabase
+    .from('goals')
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq('id', goalId);
+  if (error) throw error;
+}
+
 export async function createGoal(
   userId: string,
   goal: Omit<Goal, 'id' | 'linkedSessionIds' | 'status'>

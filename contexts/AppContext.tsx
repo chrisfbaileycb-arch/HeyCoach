@@ -28,6 +28,7 @@ export interface AppContextType {
   completeSession: (id: string) => void;
   snoozeSession: (id: string) => void;
   addGoal: (g: Omit<Goal, 'id' | 'linkedSessionIds' | 'status'>) => void;
+  completeGoal: (id: string) => void;
   sendVoiceCommand: (text: string) => string;
   clearVoiceHistory: () => void;
   refreshBriefing: () => void;
@@ -254,6 +255,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // ─── Goals ───────────────────────────────────────────────────────────────
 
+  const completeGoal = useCallback(async (id: string) => {
+    // Optimistic update
+    setGoals((prev) =>
+      prev.map((g) => (g.id === id ? { ...g, status: 'completed' as const } : g))
+    );
+    try {
+      await GoalService.updateGoalStatus(id, 'completed');
+    } catch (err) {
+      console.error('[AppContext] Failed to complete goal:', err);
+      // Revert on failure
+      setGoals((prev) =>
+        prev.map((g) => (g.id === id ? { ...g, status: 'pending' as const } : g))
+      );
+    }
+  }, []);
+
   const addGoal = useCallback(
     async (goal: Omit<Goal, 'id' | 'linkedSessionIds' | 'status'>) => {
       if (!user) return;
@@ -391,6 +408,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         completeSession,
         snoozeSession,
         addGoal,
+        completeGoal,
         sendVoiceCommand,
         clearVoiceHistory,
         refreshBriefing,
