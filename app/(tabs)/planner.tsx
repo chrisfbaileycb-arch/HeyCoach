@@ -10,14 +10,132 @@ import {
   KeyboardAvoidingView,
   Platform,
   ActivityIndicator,
+  Dimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Colors, Spacing, Radius, Typography } from '@/constants/theme';
 import { useApp } from '@/hooks/useApp';
+import { getPersonaById } from '@/constants/personas';
 import type { Session, Goal } from '@/types';
 
-// ─── Grid constants ──────────────────────────────────────────────────────────
+// ─── Week strip helpers ──────────────────────────────────────────────────────
+const SCREEN_W = Dimensions.get('window').width;
+const DAY_ABBRS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function getWeekDates(anchor: Date): Date[] {
+  // Return Mon–Sun of the week containing anchor
+  const result: Date[] = [];
+  const dow = anchor.getDay(); // 0=Sun
+  // Start from Monday (dow 1); if Sunday (0) go back 6 days
+  const startOffset = dow === 0 ? -6 : 1 - dow;
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(anchor);
+    d.setDate(anchor.getDate() + startOffset + i);
+    d.setHours(0, 0, 0, 0);
+    result.push(d);
+  }
+  return result;
+}
+
+interface WeekStripProps {
+  selectedDate: Date;
+  sessions: Session[];
+  personaColor: string;
+  onDayPress: (date: Date) => void;
+}
+
+function WeekStrip({ selectedDate, sessions, personaColor, onDayPress }: WeekStripProps) {
+  const todayStr = isoDateStr(new Date());
+  const weekDates = useMemo(() => getWeekDates(selectedDate), [isoDateStr(selectedDate)]);
+
+  return (
+    <View style={ws.container}>
+      {weekDates.map((date) => {
+        const ds = isoDateStr(date);
+        const isToday = ds === todayStr;
+        const isSelected = ds === isoDateStr(selectedDate);
+        const daySess = sessions.filter((s) => isoDateStr(new Date(s.scheduledAt)) === ds);
+        const total = daySess.length;
+        const completed = daySess.filter((s) => s.status === 'completed').length;
+        const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+        const hasSessions = total > 0;
+
+        return (
+          <Pressable
+            key={ds}
+            style={({ pressed }) => [ws.dayCol, pressed && { opacity: 0.7 }]}
+            onPress={() => onDayPress(date)}
+          >
+            {/* Day abbr */}
+            <Text
+              style={[
+                ws.dayAbbr,
+                isToday && { color: personaColor },
+                isSelected && !isToday && { color: Colors.text },
+              ]}
+            >
+              {DAY_ABBRS[date.getDay()]}
+            </Text>
+
+            {/* Date circle */}
+            <View
+              style={[
+                ws.circle,
+                isSelected && { backgroundColor: personaColor },
+                isToday && !isSelected && { borderColor: personaColor, borderWidth: 1.5 },
+              ]}
+            >
+              <Text
+                style={[
+                  ws.dateNum,
+                  isSelected && { color: Colors.textInverse, fontWeight: '700' },
+                  isToday && !isSelected && { color: personaColor, fontWeight: '600' },
+                ]}
+              >
+                {date.getDate()}
+              </Text>
+            </View>
+
+            {/* Session dot */}
+            <View style={ws.dotWrap}>
+              {hasSessions ? (
+                <View
+                  style={[
+                    ws.dot,
+                    {
+                      backgroundColor:
+                        pct === 100
+                          ? Colors.success
+                          : isSelected
+                          ? personaColor
+                          : Colors.textSubtle,
+                    },
+                  ]}
+                />
+              ) : (
+                <View style={ws.dotEmpty} />
+              )}
+            </View>
+
+            {/* Completion ratio */}
+            <Text
+              style={[
+                ws.ratio,
+                pct === 100 && { color: Colors.success },
+                isSelected && pct !== 100 && { color: personaColor },
+              ]}
+            >
+              {hasSessions ? `${pct}%` : '·'}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+}
+
+// ─── Grid constants ───────────────────────────────────────────────────────────
 const HOUR_HEIGHT = 72;
 const START_HOUR = 6;   // 6 AM
 const END_HOUR = 23;    // 11 PM
@@ -367,7 +485,8 @@ function DetailSheet({ session, isGenerating, onClose, onComplete, onSnooze }: D
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function PlannerScreen() {
   const insets = useSafeAreaInsets();
-  const { sessions, goals, completeSession, snoozeSession, addSession, generatingMessageIds } = useApp();
+  const { sessions, goals, completeSession, snoozeSession, addSession, generatingMessageIds, activePersonaId } = useApp();
+  const persona = getPersonaById(activePersonaId);
   const scrollRef = useRef<ScrollView>(null);
 
   const [selectedDate, setSelectedDate] = useState(() => new Date());
@@ -427,6 +546,14 @@ export default function PlannerScreen() {
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
+
+      {/* ── 7-Day Week Strip ──────────────────────────────────────── */}
+      <WeekStrip
+        selectedDate={selectedDate}
+        sessions={sessions}
+        personaColor={persona.color}
+        onDayPress={(date) => setSelectedDate(date)}
+      />
 
       {/* ── Date navigation ─────────────────────────────────────────── */}
       <View style={styles.header}>
@@ -603,6 +730,64 @@ export default function PlannerScreen() {
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Week strip styles ───────────────────────────────────────────────────────
+const ws = StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    paddingHorizontal: Spacing.sm,
+    paddingTop: Spacing.sm,
+    paddingBottom: 6,
+    backgroundColor: Colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: Colors.border,
+  },
+  dayCol: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 3,
+  },
+  dayAbbr: {
+    ...Typography.micro,
+    color: Colors.textSubtle,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  circle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  dateNum: {
+    fontSize: 13,
+    color: Colors.textSecondary,
+    fontWeight: '400',
+  },
+  dotWrap: {
+    height: 7,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  dotEmpty: {
+    width: 5,
+    height: 5,
+  },
+  ratio: {
+    fontSize: 9,
+    color: Colors.textSubtle,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+  },
+});
+
+// ─── Screen styles ────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
 
