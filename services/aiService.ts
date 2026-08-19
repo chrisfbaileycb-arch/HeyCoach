@@ -1,5 +1,3 @@
-import { supabase } from '@/lib/supabase';
-import { FunctionsHttpError } from '@supabase/supabase-js';
 
 // ─── Daily Briefing ──────────────────────────────────────────────────────────
 
@@ -31,30 +29,12 @@ export interface GenerateDailyBriefingParams {
 export async function generateDailyBriefing(
   params: GenerateDailyBriefingParams
 ): Promise<string | null> {
-  try {
-    const { data, error } = await supabase.functions.invoke('daily-briefing', {
-      body: params,
-    });
-
-    if (error) {
-      let detail = error.message;
-      if (error instanceof FunctionsHttpError) {
-        try {
-          const text = await error.context?.text();
-          detail = text || detail;
-        } catch {
-          // ignore
-        }
-      }
-      console.error('[aiService] daily-briefing error:', detail);
-      return null;
-    }
-
-    return (data as { briefing?: string })?.briefing ?? null;
-  } catch (err) {
-    console.error('[aiService] daily-briefing invoke failed:', err);
-    return null;
-  }
+  const pending = params.sessions.filter((s) => s.status === 'pending');
+  const unblocked = params.goals.filter((g) => g.status !== 'completed' && !g.hasTimeBlock);
+  const next = pending[0];
+  if (!next) return `Your board is clear. Choose one meaningful goal and give it a time block.`;
+  const at = new Date(next.scheduledAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `${next.title} is next at ${at}. ${unblocked.length ? `${unblocked.length} goal${unblocked.length === 1 ? '' : 's'} still need calendar time. ` : ''}Show up and finish the block.`;
 }
 
 // ─── Session Coach Message ────────────────────────────────────────────────────
@@ -77,29 +57,6 @@ export interface GenerateSessionMessageParams {
 export async function generateSessionCoachMessage(
   params: GenerateSessionMessageParams
 ): Promise<string | null> {
-  try {
-    const { data, error } = await supabase.functions.invoke(
-      'generate-session-message',
-      { body: params }
-    );
-
-    if (error) {
-      let detail = error.message;
-      if (error instanceof FunctionsHttpError) {
-        try {
-          const text = await error.context?.text();
-          detail = text || detail;
-        } catch {
-          // ignore
-        }
-      }
-      console.error('[aiService] generate-session-message error:', detail);
-      return null;
-    }
-
-    return (data as { message?: string })?.message ?? null;
-  } catch (err) {
-    console.error('[aiService] invoke failed:', err);
-    return null;
-  }
+  const at = new Date(params.scheduledAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return `${params.sessionTitle} starts at ${at}. Protect the block and finish what you scheduled.`;
 }
