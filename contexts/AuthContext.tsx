@@ -6,12 +6,13 @@ import React, {
   useContext,
   ReactNode,
 } from 'react';
-type LocalUser = { id: string; email: string; user_metadata: { username: string } };
-type LocalSession = { user: LocalUser };
+import { AppState } from 'react-native';
+import { Session, User } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabase';
 
 interface AuthContextType {
-  user: LocalUser | null;
-  session: LocalSession | null;
+  user: User | null;
+  session: Session | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signUp: (
@@ -25,32 +26,65 @@ interface AuthContextType {
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const localUser: LocalUser = { id: 'local-owner', email: '', user_metadata: { username: 'Owner' } };
-  const [user, setUser] = useState<LocalUser | null>(localUser);
-  const [session, setSession] = useState<LocalSession | null>({ user: localUser });
-  const [loading] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Private alpha: identity stays on this device. No remote auth or tracking.
+    // Restore session on mount
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+      setLoading(false);
+    });
+
+    // Listen to auth state changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setUser(session?.user ?? null);
+    });
+
+    // Manage token refresh on app state changes
+    const appStateSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        supabase.auth.startAutoRefresh();
+      } else {
+        supabase.auth.stopAutoRefresh();
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+      appStateSub.remove();
+    };
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const next = { ...localUser, email };
-    setUser(next); setSession({ user: next });
-    return { error: null };
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    return { error: error?.message ?? null };
   }, []);
 
   const signUp = useCallback(
     async (email: string, password: string, username?: string) => {
-      const next = { ...localUser, email, user_metadata: { username: username || email.split('@')[0] } };
-      setUser(next); setSession({ user: next });
-      return { error: null, needsConfirmation: false };
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { username: username || email.split('@')[0] },
+        },
+      });
+      if (error) return { error: error.message };
+      // If session is null after sign up, email confirmation is required
+      const needsConfirmation = !data.session;
+      return { error: null, needsConfirmation };
     },
     []
   );
 
   const signOut = useCallback(async () => {
-    setUser(localUser); setSession({ user: localUser });
+    await supabase.auth.signOut();
   }, []);
 
   return (
