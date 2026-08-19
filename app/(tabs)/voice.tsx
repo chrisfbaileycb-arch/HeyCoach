@@ -14,7 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import { Colors, Spacing, Radius, Typography } from '@/constants/theme';
 import { useApp } from '@/hooks/useApp';
-import { getPersonaById, INTENSITY_LABELS } from '@/constants/personas';
+import { getPersonaById } from '@/constants/personas';
 import { VoicePulse } from '@/components';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -33,22 +33,16 @@ const QUICK_CMDS = [
   'Snooze next session',
 ];
 
-const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL ?? '';
-const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY ?? '';
-const COACH_CHAT_URL = `${SUPABASE_URL}/functions/v1/coach-chat`;
-
 // ─── Screen ───────────────────────────────────────────────────────────────────
 export default function VoiceScreen() {
   const insets = useSafeAreaInsets();
-  const { sessions, goals, activePersonaId, intensity } = useApp();
+  const { activePersonaId, intensity, sendVoiceCommand } = useApp();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const [ttsReady, setTtsReady] = useState('');
   const scrollRef = useRef<ScrollView>(null);
-  // Keep an api-friendly history for context window
-  const historyRef = useRef<{ role: 'user' | 'assistant'; content: string }[]>([]);
 
   const persona = getPersonaById(activePersonaId);
 
@@ -71,105 +65,10 @@ export default function VoiceScreen() {
       setMessages(prev => [...prev, userMsg]);
       setIsThinking(true);
 
-      // Build context payload
-      const sessionContext = sessions.map(s => ({
-        title: s.title,
-        scheduledAt: s.scheduledAt,
-        status: s.status,
-        category: s.category,
-        durationMinutes: s.durationMinutes,
-      }));
-      const goalContext = goals.map(g => ({
-        title: g.title,
-        lifeArea: g.lifeArea,
-        horizon: g.horizon,
-        status: g.status,
-        hasTimeBlock: g.linkedSessionIds.length > 0,
-      }));
-
-      const payload = {
-        message: trimmed,
-        personaId: activePersonaId,
-        personaName: persona.name,
-        personaTone: persona.tone,
-        intensity,
-        intensityLabel: INTENSITY_LABELS[intensity] ?? 'Firm',
-        sessions: sessionContext,
-        goals: goalContext,
-        history: historyRef.current,
-      };
-
-      let fullText = '';
-
-      try {
-        const response = await fetch(COACH_CHAT_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-          },
-          body: JSON.stringify(payload),
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const reader = response.body?.getReader();
-
-        if (reader) {
-          // ── Streaming path ──────────────────────────────────────────
-          const decoder = new TextDecoder();
-          setIsThinking(false);
-
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
-
-            for (const line of lines) {
-              if (!line.startsWith('data:')) continue;
-              const data = line.slice(5).trim();
-              if (data === '[DONE]') break;
-              try {
-                const parsed = JSON.parse(data);
-                const delta = parsed.choices?.[0]?.delta?.content ?? '';
-                if (delta) {
-                  fullText += delta;
-                  setStreaming(fullText);
-                }
-              } catch {
-                // non-JSON line, skip
-              }
-            }
-          }
-        } else {
-          // ── Full response fallback (mobile) ─────────────────────────
-          const text = await response.text();
-          const lines = text.split('\n');
-          for (const line of lines) {
-            if (!line.startsWith('data:')) continue;
-            const data = line.slice(5).trim();
-            if (data === '[DONE]') break;
-            try {
-              const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta?.content ?? '';
-              if (delta) fullText += delta;
-            } catch {
-              // skip
-            }
-          }
-          setIsThinking(false);
-          setStreaming(fullText);
-        }
-      } catch (err) {
-        console.error('[VoiceScreen] AI error:', err);
-        fullText = persona.idleMessage(intensity);
-        setIsThinking(false);
-        setStreaming(fullText);
-      }
+      // Private alpha: coaching is computed on-device. Nothing is uploaded.
+      const fullText = sendVoiceCommand(trimmed);
+      setIsThinking(false);
+      setStreaming(fullText);
 
       // Commit streaming text to message history
       if (fullText) {
@@ -178,17 +77,11 @@ export default function VoiceScreen() {
         setStreaming('');
         setTtsReady(fullText);
 
-        // Update API history for next turn context
-        historyRef.current = [
-          ...historyRef.current.slice(-14),
-          { role: 'user', content: trimmed },
-          { role: 'assistant', content: fullText },
-        ];
       } else {
         setIsThinking(false);
       }
     },
-    [isThinking, sessions, goals, activePersonaId, intensity, persona]
+    [isThinking, sendVoiceCommand]
   );
 
   // ─── TTS ───────────────────────────────────────────────────────────────────
@@ -201,7 +94,6 @@ export default function VoiceScreen() {
     setMessages([]);
     setStreaming('');
     setTtsReady('');
-    historyRef.current = [];
     Speech.stop();
   }, []);
 
